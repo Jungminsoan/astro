@@ -1,216 +1,99 @@
-import streamlit as st
-
 import numpy as np
-
-from astropy.io import fits
-
-from PIL import Image
-
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz
-
-from astropy.time import Time
-
-from datetime import datetime
-
-
-# --- Streamlit 앱 페이지 설정 ---
-
-st.set_page_config(page_title="천문 이미지 분석기", layout="wide")
-
-st.title("🔭 천문 이미지 처리 앱")
-
-
-# --- 파일 업로더 ---
-
-uploaded_file = st.file_uploader(
-
-    "분석할 FITS 파일을 선택하세요.",
-
-    type=['fits', 'fit', 'fz']
-
-)
-
-
-# --- 서울 위치 설정 (고정값) ---
-
-seoul_location = EarthLocation(lat=37.5665, lon=126.9780, height=50)  # 서울 위도/경도/고도
-
-
-# --- 현재 시간 (UTC 기준) ---
-
-now = datetime.utcnow()
-
-now_astropy = Time(now)
-
-
-# --- 파일이 업로드되면 실행될 로직 ---
-
-if uploaded_file:
-
-    try:
-
-        with fits.open(uploaded_file) as hdul:
-
-            image_hdu = None
-
-            for hdu in hdul:
-
-                if hdu.data is not None and hdu.is_image:
-
-                    image_hdu = hdu
-
-                    break
-
-
-            if image_hdu is None:
-
-                st.error("파일에서 유효한 이미지 데이터를 찾을 수 없습니다.")
-
-            else:
-
-                header = image_hdu.header
-
-                data = image_hdu.data
-
-                data = np.nan_to_num(data)
-
-
-                st.success(f"**'{uploaded_file.name}'** 파일을 성공적으로 처리했습니다.")
-
-                col1, col2 = st.columns(2)
-
-
-                with col1:
-
-                    st.header("이미지 정보")
-
-                    st.text(f"크기: {data.shape[1]} x {data.shape[0]} 픽셀")
-
-                    if 'OBJECT' in header:
-
-                        st.text(f"관측 대상: {header['OBJECT']}")
-
-                    if 'EXPTIME' in header:
-
-                        st.text(f"노출 시간: {header['EXPTIME']} 초")
-
-
-                    st.header("물리량")
-
-                    mean_brightness = np.mean(data)
-
-                    st.metric(label="이미지 전체 평균 밝기", value=f"{mean_brightness:.2f}")
-
-
-                with col2:
-
-                    st.header("이미지 미리보기")
-
-                    if data.max() == data.min():
-
-                        norm_data = np.zeros(data.shape, dtype=np.uint8)
-
-                    else:
-
-                        scale_min = np.percentile(data, 5)
-
-                        scale_max = np.percentile(data, 99.5)
-
-                        data_clipped = np.clip(data, scale_min, scale_max)
-
-                        norm_data = (255 * (data_clipped - scale_min) / (scale_max - scale_min)).astype(np.uint8)
-
-
-                    img = Image.fromarray(norm_data)
-
-                    st.image(img, caption="업로드된 FITS 이미지", use_container_width=True)
-
-
-
-                # --- 사이드바: 현재 천체 위치 계산 ---
-
-                st.sidebar.header("🧭 현재 천체 위치 (서울 기준)")
-
-
-                if 'RA' in header and 'DEC' in header:
-
-                    try:
-
-                        target_coord = SkyCoord(ra=header['RA'], dec=header['DEC'], unit=('hourangle', 'deg'))
-
-                        altaz = target_coord.transform_to(AltAz(obstime=now_astropy, location=seoul_location))
-
-                        altitude = altaz.alt.degree
-
-                        azimuth = altaz.az.degree
-
-
-                        st.sidebar.metric("고도 (°)", f"{altitude:.2f}")
-
-                        st.sidebar.metric("방위각 (°)", f"{azimuth:.2f}")
-
-                    except Exception as e:
-
-                        st.sidebar.warning(f"천체 위치 계산 실패: {e}")
-
-                else:
-
-                    st.sidebar.info("FITS 헤더에 RA/DEC 정보가 없습니다.")
-
-
-    except Exception as e:
-
-        st.error(f"파일 처리 중 오류가 발생했습니다: {e}")
-
-        st.warning("파일이 손상되었거나 유효한 FITS 형식이 아닐 수 있습니다.")
-
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import asyncio
+import platform
+
+# 천구와 지구의 기하학적 설정
+R = 1  # 천구의 반지름
+tilt = np.radians(23.5)  # 지구 자전축 기울기 (라디안)
+
+# 천구의 구면 좌표 생성
+u = np.linspace(0, 2 * np.pi, 20)
+v = np.linspace(0, np.pi, 20)
+x = R * np.outer(np.cos(u), np.sin(v))
+y = R * np.outer(np.sin(u), np.sin(v))
+z = R * np.outer(np.ones(np.size(u)), np.cos(v))
+
+# 별(임의의 점) 추가: 예시로 북극성(Polaris) 근처
+stars = np.array([[0, 0, R], [0.1, 0.1, R*0.95]])  # (x, y, z)
+
+# 회전 행렬 (z축 기준, 자전축 기울기 고려)
+def rotation_matrix(angle, tilt):
+    # 자전축 회전 (z축 -> 기울어진 축)
+    Rx = np.array([[1, 0, 0],
+                   [0, np.cos(tilt), -np.sin(tilt)],
+                   [0, np.sin(tilt), np.cos(tilt)]])
+    # z축 기준 회전
+    Rz = np.array([[np.cos(angle), -np.sin(angle), 0],
+                   [np.sin(angle), np.cos(angle), 0],
+                   [0, 0, 1]])
+    return Rx @ Rz @ np.linalg.inv(Rx)
+
+# 초기 설정
+def setup():
+    global fig, ax
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_xlim(-R*1.2, R*1.2)
+    ax.set_ylim(-R*1.2, R*1.2)
+    ax.set_zlim(-R*1.2, R*1.2)
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('Celestial Sphere Rotation (1 Day)')
+
+# 프레임 업데이트
+def update_loop(frame):
+    ax.clear()
+    # 하루 회전: frame은 0~360도
+    angle = np.radians(frame)
+    rot = rotation_matrix(angle, tilt)
+    
+    # 천구 회전
+    x_rot = np.zeros_like(x)
+    y_rot = np.zeros_like(y)
+    z_rot = np.zeros_like(z)
+    for i in range(x.shape[0]):
+        for j in range(x.shape[1]):
+            vec = np.array([x[i,j], y[i,j], z[i,j]])
+            vec_rot = rot @ vec
+            x_rot[i,j], y_rot[i,j], z_rot[i,j] = vec_rot
+    
+    # 별 회전
+    stars_rot = np.array([rot @ star for star in stars])
+    
+    # 천구 그리기
+    ax.plot_wireframe(x_rot, y_rot, z_rot, color='lightblue', alpha=0.5)
+    # 별 그리기
+    ax.scatter(stars_rot[:,0], stars_rot[:,1], stars_rot[:,2], color='yellow', s=50)
+    # 지구 중심
+    ax.scatter([0], [0], [0], color='green', s=100, label='Earth')
+    # 자전축 표시
+    axis_len = R*1.2
+    axis = np.array([[0, 0, -axis_len], [0, 0, axis_len]])
+    axis_rot = np.array([rot @ a for a in axis])
+    ax.plot(axis_rot[:,0], axis_rot[:,1], axis_rot[:,2], 'r-', label='Rotation Axis')
+    
+    ax.set_xlim(-R*1.2, R*1.2)
+    ax.set_ylim(-R*1.2, R*1.2)
+    ax.set_zlim(-R*1.2, R*1.2)
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.legend()
+    ax.set_title(f'Celestial Sphere Rotation: {frame:.1f}° (Hour: {frame/15:.1f})')
+
+# 애니메이션 실행
+async def main():
+    setup()
+    ani = FuncAnimation(fig, update_loop, frames=np.linspace(0, 360, 100), interval=50)
+    plt.show()
+    while True:
+        await asyncio.sleep(1.0 / 60)  # 60 FPS
+
+if platform.system() == "Emscripten":
+    asyncio.ensure_future(main())
 else:
-
-    st.info("시작하려면 FITS 파일을 업로드해주세요.")
-
-
-# --- 💬 댓글 기능 (세션 기반) ---
-
-st.divider()
-
-st.header("💬 의견 남기기")
-
-
-if "comments" not in st.session_state:
-
-    st.session_state.comments = []
-
-
-with st.form(key="comment_form"):
-
-    name = st.text_input("이름을 입력하세요", key="name_input")
-
-    comment = st.text_area("댓글을 입력하세요", key="comment_input")
-
-    submitted = st.form_submit_button("댓글 남기기")
-
-
-    if submitted:
-
-        if name.strip() and comment.strip():
-
-            st.session_state.comments.append((name.strip(), comment.strip()))
-
-            st.success("댓글이 저장되었습니다.")
-
-        else:
-
-            st.warning("이름과 댓글을 모두 입력해주세요.")
-
-
-if st.session_state.comments:
-
-    st.subheader("📋 전체 댓글")
-
-    for i, (n, c) in enumerate(reversed(st.session_state.comments), 1):
-
-        st.markdown(f"**{i}. {n}**: {c}")
-
-else:
-
-    st.info("아직 댓글이 없습니다. 첫 댓글을 남겨보세요!")
+    if __name__ == "__main__":
+        asyncio.run(main())
